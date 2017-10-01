@@ -68,6 +68,9 @@
                 deferredCBLiteUrl.resolve(cblite);
               }
             });
+          } else if (PouchDB) {
+            deferredCBLiteUrl.notify("Using PouchDB instead.");
+            deferredCBLiteUrl.reject(true);
           } else {
             throw ("Couchbase Lite plugin not found.");
           }
@@ -95,7 +98,125 @@
 
             return $resource(parsedUrl.urlNoCredentials + path, paramDefaults, actions);
           },
-          null,
+          function(pouch) {
+            if (pouch !== true) {
+                return $q.reject(pouch);
+            }
+            var p = path.split("/");
+            switch(p[0]) {
+                case '':
+                    return {
+                        // info
+                        get: function() { return $q(PouchDB); }
+                    };
+                case '_active_tasks':
+                    return {
+                        list: function() { return $q([]); }
+                    };
+                case '_all_dbs':
+                    return {
+                        // FIXME
+                        list: function() { return $q([]); }
+                    };
+                case '_replicate':
+                    var buildHost = function(vals) {
+                        if (angular.isString(vals)) {
+                            return new PouchDB(vals);
+                        }
+                        return new PouchDB(vals.url, { ajax: { headers: vals.headers } });
+                    };
+                    return {
+                        // string is our database, object is our remote
+                        post: function(rules) {
+                            var from = buildHost(rules.source);
+                            var to = buildHost(rules.target);
+                            var params = { live: rules.continuous };
+                            return PouchDB.replicate(from, to, params);
+                        }
+                    };
+                case 'db:':
+                    // paramDefaults.db: databaseName
+                    var db = new PouchDB(spec.db);
+                    delete spec.db;
+                    if (p.length == 2) {
+                        // open db
+                        return {
+                            // info
+                            // reject with { status: 404 } if missing
+                            get: function() {
+                                return db;
+                            },
+                            // create db
+                            put: function() {
+                                return db;
+                            },
+                            // create doc
+                            post: db.post
+                        };
+                    }
+                    switch (p[1]) {
+                        case '_compact':
+                            return {
+                                post: db.compact
+                            };
+                            break;
+                        case '_changes':
+                            // spec = paramDefaults
+                            return {
+                                get: function() {
+                                    var opts = angular.extend({ live: false }, spec);
+                                    return db.changes(opts);
+                                }
+                            };
+                        case '_all_docs':
+                            // spec = paramDefaults
+                            return {
+                                post: function(opts) {
+                                    return db.allDocs(angular.extend(spec, opts));
+                                },
+                                get: function() {
+                                    return db.allDocs(spec);
+                                }
+                            };
+                        case '_design':
+                            if (p.length == 3) {
+                                return {
+                                    put: function(content) {
+                                        return db.put(angular.extend({ _id: '_design/' + spec.designId; }, content));
+                                    },
+                                    delete: function(spec) {},
+                                    get: function() {}
+                                }
+                            }
+                            // p[3] = '_view'
+                            var fun = spec.designId + '/' + spec.id;
+                            delete spec.designId;
+                            delete spec.id;
+                            return {
+                                post: function(opts) {
+                                    return db.query(fun, angular.extend(spec, opts));
+                                },
+                                get: function() {
+                                    return db.query(fun, spec);
+                                }
+                            };
+                         case '_purge':
+                            return {
+                                post: function(body) { }
+                            };
+                         default:
+                            return {
+                                get: function() { return db.get(spec.doc); },
+                                put: function(content) {
+                                    return db.put(angular.extend({ _id: spec.doc }, content)),
+                                }
+                                delete: function() { return db.remove(spec.doc); }
+                            };
+
+                    }
+                    break;
+            }
+          },
           function (notification) {
             var message = "Angular Couchbase Lite: " + notification;
             $log.debug(message);
@@ -118,6 +239,12 @@
          return cbliteUrlPromise.then(
           function(parsedUrl) {
            return parsedUrl.urlNoCredentials;
+          },
+          function(pouch) {
+            if (pouch === true) {
+                return "PouchDB";
+            }
+            return $q.reject(pouch);
           }
          );
         },
